@@ -48,3 +48,6 @@ creds
 
 # playwright artifacts
 .playwright-mcp/
+
+# keep the env template tracked
+!.env.example
