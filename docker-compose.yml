@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: stronglog-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: stronglog
+      POSTGRES_PASSWORD: stronglog
+      POSTGRES_DB: stronglog
+    ports:
+      - "5432:5432"
+    volumes:
+      - stronglog-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stronglog -d stronglog"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  stronglog-pgdata:
