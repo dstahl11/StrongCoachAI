@@ -32,6 +32,10 @@ export const workouts = pgTable(
   "workouts",
   {
     id: serial("id").primaryKey(),
+    // owner; nullable during migration, backfilled to the admin
+    userId: integer("user_id").references(() => users.id, {
+      onDelete: "cascade",
+    }),
     date: date("date").notNull(),
     title: text("title").notNull().default("Workout"),
     // 'upcoming' | 'complete' | 'skipped'
@@ -42,7 +46,7 @@ export const workouts = pgTable(
     completedAt: timestamp("completed_at"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
-  (t) => [index("workouts_date_idx").on(t.date)],
+  (t) => [index("workouts_date_idx").on(t.date), index("workouts_user_idx").on(t.userId)],
 );
 
 /**
@@ -147,12 +151,44 @@ export const loggedSetsRelations = relations(loggedSets, ({ one }) => ({
 }));
 
 // ---------------------------------------------------------------------------
+// Auth: users + sessions
+// ---------------------------------------------------------------------------
+
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  name: text("name").notNull().default(""),
+  // 'admin' | 'user'
+  role: text("role").notNull().default("user"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  lastLoginAt: timestamp("last_login_at"),
+});
+
+export const sessions = pgTable(
+  "sessions",
+  {
+    // random opaque token (also the cookie value)
+    id: text("id").primaryKey(),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    expiresAt: timestamp("expires_at").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("sessions_user_idx").on(t.userId)],
+);
+
+// ---------------------------------------------------------------------------
 // AI Coach
 // ---------------------------------------------------------------------------
 
-/** Singleton (id = 1) holding the coach's identity, personality, and config. */
+/** One coach per user — identity, personality, and config. */
 export const coachProfile = pgTable("coach_profile", {
   id: serial("id").primaryKey(),
+  userId: integer("user_id")
+    .unique()
+    .references(() => users.id, { onDelete: "cascade" }),
   name: text("name").notNull().default("Coach"),
   // the editable "soul" — personality / voice / coaching philosophy
   persona: text("persona").notNull().default(""),
@@ -175,6 +211,7 @@ export const coachProfile = pgTable("coach_profile", {
 /** Long-term facts the coach remembers about the athlete. */
 export const coachMemories = pgTable("coach_memories", {
   id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }),
   // 'injury' | 'constraint' | 'preference' | 'goal' | 'note'
   kind: text("kind").notNull().default("note"),
   content: text("content").notNull(),
@@ -185,6 +222,7 @@ export const coachMemories = pgTable("coach_memories", {
 /** Date ranges the athlete is unavailable (travel etc.). Inclusive. */
 export const blackoutDays = pgTable("blackout_days", {
   id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }),
   startDate: date("start_date").notNull(),
   endDate: date("end_date").notNull(),
   reason: text("reason"),
@@ -196,6 +234,7 @@ export const chatMessages = pgTable(
   "chat_messages",
   {
     id: serial("id").primaryKey(),
+    userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }),
     // 'user' | 'assistant' | 'tool'
     role: text("role").notNull(),
     content: text("content").notNull().default(""),
@@ -210,6 +249,7 @@ export const coachEvents = pgTable(
   "coach_events",
   {
     id: serial("id").primaryKey(),
+    userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }),
     // 'reminder' | 'digest' | 'check' | 'program_update' | 'chat_action'
     type: text("type").notNull(),
     channel: text("channel"), // 'email' | 'system'
@@ -229,6 +269,8 @@ export type Workout = typeof workouts.$inferSelect;
 export type WorkoutExercise = typeof workoutExercises.$inferSelect;
 export type SetGroup = typeof setGroups.$inferSelect;
 export type LoggedSet = typeof loggedSets.$inferSelect;
+export type User = typeof users.$inferSelect;
+export type Session = typeof sessions.$inferSelect;
 export type CoachProfile = typeof coachProfile.$inferSelect;
 export type CoachMemory = typeof coachMemories.$inferSelect;
 export type BlackoutDay = typeof blackoutDays.$inferSelect;

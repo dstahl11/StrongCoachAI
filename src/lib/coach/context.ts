@@ -25,6 +25,7 @@ export async function getCoachProfile(): Promise<CoachProfile> {
   // fall back to an in-memory default if the seed hasn't run
   return {
     id: 1,
+    userId: null,
     name: "Coach",
     persona: "",
     model: "claude-sonnet-4-6",
