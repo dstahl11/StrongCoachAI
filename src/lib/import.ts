@@ -1,4 +1,5 @@
 import { parse } from "csv-parse/sync";
+import { eq } from "drizzle-orm";
 import { db } from "../db";
 import {
   exercises,
@@ -108,9 +109,10 @@ function groupRows(rows: Row[]) {
 
 export async function importWorkouts(
   rows: Row[],
-  opts: { replace: boolean } = { replace: true },
+  opts: { replace: boolean; userId: number },
 ): Promise<ImportSummary> {
   const { workoutsById, exerciseNames, skipped } = groupRows(rows);
+  const { userId } = opts;
 
   let loggedCount = 0;
 
@@ -118,10 +120,8 @@ export async function importWorkouts(
   // per statement turns a multi-second import into a sub-second one.
   await db.transaction(async (tx) => {
     if (opts.replace) {
-      await tx.delete(loggedSets);
-      await tx.delete(setGroups);
-      await tx.delete(workoutExercises);
-      await tx.delete(workouts);
+      // only wipe THIS user's workouts (cascades to exercises/sets/logged sets)
+      await tx.delete(workouts).where(eq(workouts.userId, userId));
       // keep the exercise catalog; we upsert below
     }
 
@@ -150,6 +150,7 @@ export async function importWorkouts(
       tx,
       workouts,
       orderedWorkouts.map((w) => ({
+        userId,
         date: w.date,
         title: "Workout",
         status: w.completed ? "complete" : "upcoming",

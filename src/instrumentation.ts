@@ -17,16 +17,12 @@ export async function register() {
 
   const cron = (await import("node-cron")).default;
   const { runDailyTick } = await import("@/lib/coach/reminders");
-  const { getCoachProfile } = await import("@/lib/coach/context");
 
-  // top of every hour; the handler decides whether it's the configured hour
+  // hourly; runDailyTick fires each user at their own configured digest hour
   cron.schedule("0 * * * *", async () => {
     try {
-      const profile = await getCoachProfile();
-      if (!profile.digestEnabled && !profile.remindersEnabled) return;
-      if (new Date().getHours() !== profile.digestHour) return;
       const report = await runDailyTick();
-      console.log("[coach] daily tick:", JSON.stringify(report));
+      if (report.users) console.log("[coach] daily tick:", JSON.stringify(report));
     } catch (e) {
       console.error("[coach] tick error", e);
     }

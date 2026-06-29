@@ -1,10 +1,12 @@
 import Link from "next/link";
 import { Dumbbell, CalendarDays, List } from "lucide-react";
-import { db } from "@/db";
-import { workouts } from "@/db/schema";
-import { eq } from "drizzle-orm";
-import { getDaySummaries, getAllWorkoutDates } from "@/lib/queries";
+import {
+  getDaySummaries,
+  getAllWorkoutDates,
+  getCompletedCount,
+} from "@/lib/queries";
 import { getBlackouts } from "@/lib/coach/blackouts";
+import { requireUser, publicUser } from "@/lib/auth/current-user";
 import { weekOf, todayISO, fmt } from "@/lib/dates";
 import { fmtScheme } from "@/lib/strength";
 import { cn } from "@/lib/utils";
@@ -19,23 +21,25 @@ export default async function CalendarPage({
 }: {
   searchParams: Promise<{ date?: string; view?: string }>;
 }) {
+  const user = await requireUser();
+  const me = publicUser(user);
   const sp = await searchParams;
   const view = sp.view === "list" ? "list" : "month";
   const selected = sp.date ?? todayISO();
 
-  const completedCount = (
-    await db.select().from(workouts).where(eq(workouts.status, "complete"))
-  ).length;
+  const completedCount = await getCompletedCount(user.id);
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-6">
       {/* Athlete header */}
       <div className="mb-4 flex items-center gap-3">
         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-canvas text-sm font-bold text-ink ring-1 ring-line">
-          DS
+          {me.initials}
         </div>
         <div className="min-w-0">
-          <div className="text-lg font-bold leading-tight">David Stahl</div>
+          <div className="text-lg font-bold leading-tight">
+            {me.name || me.email}
+          </div>
           <div className="text-sm text-muted">
             {completedCount} Completed Workouts
           </div>
@@ -71,8 +75,8 @@ export default async function CalendarPage({
 
       {view === "month" ? (
         <MonthCalendar
-          statuses={await getAllWorkoutDates()}
-          blackouts={(await getBlackouts()).map((b) => ({
+          statuses={await getAllWorkoutDates(user.id)}
+          blackouts={(await getBlackouts(user.id)).map((b) => ({
             startDate: b.startDate,
             endDate: b.endDate,
             reason: b.reason,
@@ -80,14 +84,20 @@ export default async function CalendarPage({
           today={todayISO()}
         />
       ) : (
-        <ListView selected={selected} />
+        <ListView selected={selected} userId={user.id} />
       )}
     </div>
   );
 }
 
-async function ListView({ selected }: { selected: string }) {
-  const summaries = await getDaySummaries(weekOf(selected));
+async function ListView({
+  selected,
+  userId,
+}: {
+  selected: string;
+  userId: number;
+}) {
+  const summaries = await getDaySummaries(weekOf(selected), userId);
   const day = summaries[selected];
   const status = day?.status;
 

@@ -1,5 +1,5 @@
 import "server-only";
-import { asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import { getDay, parseISO } from "date-fns";
 import { db } from "@/db";
 import {
@@ -65,11 +65,11 @@ type TemplateExercise = { name: string; sets: number; reps: number };
 type PlannedExercise = TemplateExercise & { weight: number };
 
 /** Derive an A/B (or A) rotation from the athlete's most recent sessions. */
-async function deriveTemplates(): Promise<TemplateExercise[][]> {
+async function deriveTemplates(userId: number): Promise<TemplateExercise[][]> {
   const completed = await db
     .select({ id: workouts.id, date: workouts.date })
     .from(workouts)
-    .where(eq(workouts.status, "complete"))
+    .where(and(eq(workouts.status, "complete"), eq(workouts.userId, userId)))
     .orderBy(desc(workouts.date))
     .limit(8);
 
@@ -100,7 +100,7 @@ async function deriveTemplates(): Promise<TemplateExercise[][]> {
 }
 
 /** Most recent completed top-set weight per exercise name. */
-async function currentWeights(): Promise<Map<string, number>> {
+async function currentWeights(userId: number): Promise<Map<string, number>> {
   const rows = await db
     .select({
       name: exercises.name,
@@ -111,7 +111,7 @@ async function currentWeights(): Promise<Map<string, number>> {
     .innerJoin(workoutExercises, eq(workoutExercises.id, loggedSets.workoutExerciseId))
     .innerJoin(exercises, eq(exercises.id, workoutExercises.exerciseId))
     .innerJoin(workouts, eq(workouts.id, workoutExercises.workoutId))
-    .where(eq(loggedSets.completed, true))
+    .where(and(eq(loggedSets.completed, true), eq(workouts.userId, userId)))
     .orderBy(desc(workouts.date), desc(loggedSets.weight));
   const m = new Map<string, number>();
   for (const r of rows) if (!m.has(r.name)) m.set(r.name, num(r.weight));
@@ -143,12 +143,14 @@ export async function ensureScheduled(
   profile: CoachProfile,
   daysAhead = 14,
 ): Promise<PlannedSession[]> {
+  const userId = profile.userId;
+  if (userId == null) return [];
   const c = cfg(profile);
-  const templates = await deriveTemplates();
+  const templates = await deriveTemplates(userId);
   if (!templates.length) return []; // nothing to base programming on yet
 
-  const weights = await currentWeights();
-  const blackouts = await getBlackouts();
+  const weights = await currentWeights(userId);
+  const blackouts = await getBlackouts(userId);
   const isBlackout = (d: string) =>
     blackouts.some((b) => d >= b.startDate && d <= b.endDate);
 
@@ -165,7 +167,7 @@ export async function ensureScheduled(
     if (isBlackout(date)) continue;
 
     const existing = await db.query.workouts.findFirst({
-      where: eq(workouts.date, date),
+      where: and(eq(workouts.date, date), eq(workouts.userId, userId)),
     });
     if (existing) {
       rotation++; // keep rotation aligned even when a day is already planned
@@ -180,7 +182,7 @@ export async function ensureScheduled(
 
     const [wo] = await db
       .insert(workouts)
-      .values({ date, title: "Workout", status: "upcoming", source: "coach" })
+      .values({ userId, date, title: "Workout", status: "upcoming", source: "coach" })
       .returning();
     let pos = 0;
     for (const ex of template) {

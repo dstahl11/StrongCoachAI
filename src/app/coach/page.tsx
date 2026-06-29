@@ -1,14 +1,16 @@
 import { getCoachProfile } from "@/lib/coach/context";
 import { getTranscript } from "@/lib/coach/chat";
 import { coachConfigured } from "@/lib/coach/client";
+import { requireUser } from "@/lib/auth/current-user";
 import CoachChat from "@/components/CoachChat";
 
 export const dynamic = "force-dynamic";
 
 export default async function CoachPage() {
+  const user = await requireUser();
   const [profile, transcript] = await Promise.all([
-    getCoachProfile(),
-    getTranscript(),
+    getCoachProfile(user.id),
+    getTranscript(user.id),
   ]);
 
   return (

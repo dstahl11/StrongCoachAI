@@ -52,12 +52,13 @@ export type WorkoutView = {
 const num = (v: string | null | number) =>
   v === null ? 0 : typeof v === "number" ? v : parseFloat(v);
 
-/** Full workout for a given date (or null if none). */
+/** Full workout for a given date (scoped to the user), or null if none. */
 export async function getWorkoutByDate(
   date: string,
+  userId: number,
 ): Promise<WorkoutView | null> {
   const wo = await db.query.workouts.findFirst({
-    where: eq(workouts.date, date),
+    where: and(eq(workouts.date, date), eq(workouts.userId, userId)),
     with: {
       exercises: {
         orderBy: asc(workoutExercises.position),
@@ -115,9 +116,10 @@ export type DaySummary = {
 };
 
 /** Lightweight summaries for a set of dates (week strip + day card). */
-export async function getDaySummaries(dates: string[]): Promise<
-  Record<string, DaySummary>
-> {
+export async function getDaySummaries(
+  dates: string[],
+  userId: number,
+): Promise<Record<string, DaySummary>> {
   const rows = await db
     .select({
       date: workouts.date,
@@ -133,7 +135,7 @@ export async function getDaySummaries(dates: string[]): Promise<
     .leftJoin(workoutExercises, eq(workoutExercises.workoutId, workouts.id))
     .leftJoin(exercises, eq(exercises.id, workoutExercises.exerciseId))
     .leftJoin(setGroups, eq(setGroups.workoutExerciseId, workoutExercises.id))
-    .where(inArray(workouts.date, dates))
+    .where(and(inArray(workouts.date, dates), eq(workouts.userId, userId)))
     .orderBy(asc(workouts.date), asc(workoutExercises.position), asc(setGroups.position));
 
   const out: Record<string, DaySummary> = {};
@@ -167,6 +169,7 @@ export type HistoryEntry = {
 /** Per-exercise logged history (newest first), with e1RM per session. */
 export async function getExerciseHistory(
   exerciseId: number,
+  userId: number,
 ): Promise<HistoryEntry[]> {
   const rows = await db
     .select({
@@ -182,7 +185,13 @@ export async function getExerciseHistory(
       eq(workoutExercises.id, loggedSets.workoutExerciseId),
     )
     .innerJoin(workouts, eq(workouts.id, workoutExercises.workoutId))
-    .where(and(eq(workoutExercises.exerciseId, exerciseId), eq(loggedSets.completed, true)))
+    .where(
+      and(
+        eq(workoutExercises.exerciseId, exerciseId),
+        eq(loggedSets.completed, true),
+        eq(workouts.userId, userId),
+      ),
+    )
     .orderBy(desc(workouts.date), asc(loggedSets.setNumber));
 
   // group by workout-exercise (one session) -> top set + count
@@ -227,7 +236,10 @@ export type ExercisePR = {
 };
 
 /** Best weight for each rep count (rep-max PRs) for an exercise. */
-export async function getExercisePRs(exerciseId: number): Promise<ExercisePR[]> {
+export async function getExercisePRs(
+  exerciseId: number,
+  userId: number,
+): Promise<ExercisePR[]> {
   const rows = await db
     .select({
       reps: loggedSets.reps,
@@ -238,7 +250,14 @@ export async function getExercisePRs(exerciseId: number): Promise<ExercisePR[]> 
       workoutExercises,
       eq(workoutExercises.id, loggedSets.workoutExerciseId),
     )
-    .where(and(eq(workoutExercises.exerciseId, exerciseId), eq(loggedSets.completed, true)))
+    .innerJoin(workouts, eq(workouts.id, workoutExercises.workoutId))
+    .where(
+      and(
+        eq(workoutExercises.exerciseId, exerciseId),
+        eq(loggedSets.completed, true),
+        eq(workouts.userId, userId),
+      ),
+    )
     .groupBy(loggedSets.reps)
     .orderBy(asc(loggedSets.reps));
 
@@ -258,6 +277,7 @@ export async function getExercisePRs(exerciseId: number): Promise<ExercisePR[]> 
           eq(workoutExercises.exerciseId, exerciseId),
           eq(loggedSets.reps, r.reps),
           eq(loggedSets.weight, weight.toFixed(2)),
+          eq(workouts.userId, userId),
         ),
       )
       .orderBy(asc(workouts.date))
@@ -267,7 +287,7 @@ export async function getExercisePRs(exerciseId: number): Promise<ExercisePR[]> 
   return out;
 }
 
-/** All exercises in the catalog. */
+/** All exercises in the (shared, global) catalog. */
 export async function getExercises() {
   return db.select().from(exercises).orderBy(asc(exercises.name));
 }
@@ -276,11 +296,14 @@ export async function getExercises() {
 
 export type WorkoutDateStatus = { date: string; status: string };
 
-/** Every workout's date + status (cheap; used by the month calendar). */
-export async function getAllWorkoutDates(): Promise<WorkoutDateStatus[]> {
+/** Every workout's date + status for a user (used by the month calendar). */
+export async function getAllWorkoutDates(
+  userId: number,
+): Promise<WorkoutDateStatus[]> {
   const rows = await db
     .select({ date: workouts.date, status: workouts.status })
     .from(workouts)
+    .where(eq(workouts.userId, userId))
     .orderBy(asc(workouts.date));
   return rows;
 }
@@ -288,11 +311,14 @@ export async function getAllWorkoutDates(): Promise<WorkoutDateStatus[]> {
 export type ConsistencyDay = { date: string; status: "done" | "missed" | "none" };
 
 /** Per-day completion since `sinceISO` for the consistency heatmap. */
-export async function getConsistency(sinceISO: string): Promise<ConsistencyDay[]> {
+export async function getConsistency(
+  sinceISO: string,
+  userId: number,
+): Promise<ConsistencyDay[]> {
   const rows = await db
     .select({ date: workouts.date, status: workouts.status })
     .from(workouts)
-    .where(gte(workouts.date, sinceISO))
+    .where(and(gte(workouts.date, sinceISO), eq(workouts.userId, userId)))
     .orderBy(asc(workouts.date));
   return rows.map((r) => ({
     date: r.date,
@@ -305,6 +331,7 @@ export type TonnagePoint = { date: string } & Record<string, number | string>;
 /** Stacked tonnage per session since a date, split by exercise. */
 export async function getTonnage(
   sinceISO: string,
+  userId: number,
 ): Promise<{ points: TonnagePoint[]; exercises: string[] }> {
   const rows = await db
     .select({
@@ -319,7 +346,13 @@ export async function getTonnage(
     )
     .innerJoin(exercises, eq(exercises.id, workoutExercises.exerciseId))
     .innerJoin(workouts, eq(workouts.id, workoutExercises.workoutId))
-    .where(and(gte(workouts.date, sinceISO), eq(loggedSets.completed, true)))
+    .where(
+      and(
+        gte(workouts.date, sinceISO),
+        eq(loggedSets.completed, true),
+        eq(workouts.userId, userId),
+      ),
+    )
     .groupBy(workouts.date, exercises.name)
     .orderBy(asc(workouts.date));
 
@@ -339,6 +372,7 @@ export type TrendPoint = { date: string } & Record<string, number | string>;
 /** Estimated-1RM of the top set per session, per exercise, for the trend chart. */
 export async function getStrengthTrend(
   sinceISO: string,
+  userId: number,
 ): Promise<{ points: TrendPoint[]; exercises: string[] }> {
   const rows = await db
     .select({
@@ -355,7 +389,13 @@ export async function getStrengthTrend(
     )
     .innerJoin(exercises, eq(exercises.id, workoutExercises.exerciseId))
     .innerJoin(workouts, eq(workouts.id, workoutExercises.workoutId))
-    .where(and(gte(workouts.date, sinceISO), eq(loggedSets.completed, true)))
+    .where(
+      and(
+        gte(workouts.date, sinceISO),
+        eq(loggedSets.completed, true),
+        eq(workouts.userId, userId),
+      ),
+    )
     .orderBy(asc(workouts.date));
 
   // best e1RM per session (workout-exercise)
@@ -382,4 +422,13 @@ export async function getStrengthTrend(
     (a.date as string).localeCompare(b.date as string),
   );
   return { points, exercises: [...exSet] };
+}
+
+/** Count of completed workouts for a user (athlete header). */
+export async function getCompletedCount(userId: number): Promise<number> {
+  const rows = await db
+    .select({ id: workouts.id })
+    .from(workouts)
+    .where(and(eq(workouts.userId, userId), eq(workouts.status, "complete")));
+  return rows.length;
 }

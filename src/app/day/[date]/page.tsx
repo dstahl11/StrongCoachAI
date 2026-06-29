@@ -1,4 +1,5 @@
 import { getWorkoutByDate, getExercises } from "@/lib/queries";
+import { requireUser } from "@/lib/auth/current-user";
 import { shiftISO } from "@/lib/dates";
 import { epley1RM } from "@/lib/strength";
 import WorkoutDay from "@/components/WorkoutDay";
@@ -10,8 +11,9 @@ export default async function DayPage({
 }: {
   params: Promise<{ date: string }>;
 }) {
+  const user = await requireUser();
   const { date } = await params;
-  const workout = await getWorkoutByDate(date);
+  const workout = await getWorkoutByDate(date, user.id);
   const exercises = await getExercises();
 
   // Per-exercise top set + estimated 1RM (for the PRs / Estimated 1RMs panels)

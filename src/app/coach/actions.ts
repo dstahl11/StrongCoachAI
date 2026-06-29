@@ -1,21 +1,33 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { coachProfile, coachMemories, blackoutDays } from "@/db/schema";
 import { runChat, clearTranscript, type ChatResult } from "@/lib/coach/chat";
-import { runDailyTick, sendTest, type TickReport } from "@/lib/coach/reminders";
+import { sendTest, runUserTick, type TickReport } from "@/lib/coach/reminders";
 import { ensureScheduled } from "@/lib/coach/program";
 import { getCoachProfile } from "@/lib/coach/context";
+import { ensureCoachProfile } from "@/lib/coach/template";
 import { clearCoachWorkoutsInRange } from "@/lib/coach/blackouts";
+import { requireUser, requireAdmin } from "@/lib/auth/current-user";
+
+/** Resolve the user an action targets: self by default; admins may act on others. */
+async function actingUserId(targetUserId?: number): Promise<number> {
+  const me = await requireUser();
+  if (targetUserId == null || targetUserId === me.id) return me.id;
+  await requireAdmin();
+  return targetUserId;
+}
 
 export async function sendCoachMessage(text: string): Promise<ChatResult> {
-  return runChat(text);
+  const me = await requireUser();
+  return runChat(me.id, text);
 }
 
 export async function clearCoachChat() {
-  await clearTranscript();
+  const me = await requireUser();
+  await clearTranscript(me.id);
 }
 
 type ProfilePatch = {
@@ -31,45 +43,64 @@ type ProfilePatch = {
   autonomousProgramming?: boolean;
 };
 
-export async function updateCoachProfile(patch: ProfilePatch) {
+export async function updateCoachProfile(
+  patch: ProfilePatch,
+  targetUserId?: number,
+) {
+  const uid = await actingUserId(targetUserId);
+  await ensureCoachProfile(uid);
   await db
     .update(coachProfile)
     .set({ ...patch, updatedAt: new Date() })
-    .where(eq(coachProfile.id, 1));
+    .where(eq(coachProfile.userId, uid));
   revalidatePath("/coach");
   revalidatePath("/coach/settings");
 }
 
-export async function addCoachMemory(kind: string, content: string) {
+export async function addCoachMemory(
+  kind: string,
+  content: string,
+  targetUserId?: number,
+) {
   if (!content.trim()) return;
-  await db.insert(coachMemories).values({ kind, content: content.trim() });
+  const uid = await actingUserId(targetUserId);
+  await db.insert(coachMemories).values({ userId: uid, kind, content: content.trim() });
   revalidatePath("/coach/settings");
 }
 
 export async function updateCoachMemory(
   id: number,
   data: { kind: string; content: string; pinned?: boolean },
+  targetUserId?: number,
 ) {
+  const uid = await actingUserId(targetUserId);
   await db
     .update(coachMemories)
     .set({ kind: data.kind, content: data.content.trim(), pinned: data.pinned })
-    .where(eq(coachMemories.id, id));
+    .where(and(eq(coachMemories.id, id), eq(coachMemories.userId, uid)));
   revalidatePath("/coach/settings");
 }
 
-export async function deleteCoachMemory(id: number) {
-  await db.delete(coachMemories).where(eq(coachMemories.id, id));
+export async function deleteCoachMemory(id: number, targetUserId?: number) {
+  const uid = await actingUserId(targetUserId);
+  await db
+    .delete(coachMemories)
+    .where(and(eq(coachMemories.id, id), eq(coachMemories.userId, uid)));
   revalidatePath("/coach/settings");
 }
 
 export async function sendTestEmail(
   kind: "digest" | "reminder",
+  targetUserId?: number,
 ): Promise<{ ok: boolean; error?: string }> {
-  return sendTest(kind);
+  const uid = await actingUserId(targetUserId);
+  return sendTest(kind, uid);
 }
 
-export async function runCoachTick(): Promise<TickReport> {
-  return runDailyTick({ force: true });
+export async function runCoachTick(targetUserId?: number): Promise<TickReport> {
+  const uid = await actingUserId(targetUserId);
+  const profile = await getCoachProfile(uid);
+  return runUserTick(profile, { force: true });
 }
 
 // ---- blackout days ----
@@ -77,38 +108,48 @@ export async function addBlackout(
   startDate: string,
   endDate: string,
   reason: string,
+  targetUserId?: number,
 ) {
   if (!startDate || !endDate) return;
+  const uid = await actingUserId(targetUserId);
   const [a, b] = startDate <= endDate ? [startDate, endDate] : [endDate, startDate];
   await db
     .insert(blackoutDays)
-    .values({ startDate: a, endDate: b, reason: reason.trim() || null });
-  await clearCoachWorkoutsInRange(a, b);
+    .values({ userId: uid, startDate: a, endDate: b, reason: reason.trim() || null });
+  await clearCoachWorkoutsInRange(a, b, uid);
   revalidatePath("/coach/settings");
   revalidatePath("/calendar");
 }
 
-export async function deleteBlackout(id: number) {
-  await db.delete(blackoutDays).where(eq(blackoutDays.id, id));
+export async function deleteBlackout(id: number, targetUserId?: number) {
+  const uid = await actingUserId(targetUserId);
+  await db
+    .delete(blackoutDays)
+    .where(and(eq(blackoutDays.id, id), eq(blackoutDays.userId, uid)));
   revalidatePath("/coach/settings");
   revalidatePath("/calendar");
 }
 
 export async function updateProgramConfig(
   patch: Record<string, unknown>,
+  targetUserId?: number,
 ): Promise<void> {
-  const [p] = await db.select().from(coachProfile).where(eq(coachProfile.id, 1));
-  const current = (p?.programConfig as Record<string, unknown>) ?? {};
+  const uid = await actingUserId(targetUserId);
+  const profile = await ensureCoachProfile(uid);
+  const current = (profile.programConfig as Record<string, unknown>) ?? {};
   await db
     .update(coachProfile)
     .set({ programConfig: { ...current, ...patch }, updatedAt: new Date() })
-    .where(eq(coachProfile.id, 1));
+    .where(eq(coachProfile.userId, uid));
   revalidatePath("/coach/settings");
   revalidatePath("/calendar");
 }
 
-export async function programUpcoming(): Promise<{ created: number }> {
-  const profile = await getCoachProfile();
+export async function programUpcoming(
+  targetUserId?: number,
+): Promise<{ created: number }> {
+  const uid = await actingUserId(targetUserId);
+  const profile = await getCoachProfile(uid);
   const created = await ensureScheduled(profile, 14);
   revalidatePath("/calendar");
   revalidatePath("/dashboard");

@@ -5,6 +5,7 @@ import {
   getTonnage,
   getStrengthTrend,
 } from "@/lib/queries";
+import { requireUser } from "@/lib/auth/current-user";
 import { todayISO, fromISO, toISO } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import ConsistencyHeatmap from "@/components/ConsistencyHeatmap";
@@ -32,13 +33,14 @@ export default async function DashboardPage({
 }: {
   searchParams: Promise<{ range?: string }>;
 }) {
+  const user = await requireUser();
   const sp = await searchParams;
   const range = sp.range ?? "6mo";
   const since = sinceFor(range);
   const [consistency, tonnage, trend] = await Promise.all([
-    getConsistency(since),
-    getTonnage(since),
-    getStrengthTrend(since),
+    getConsistency(since, user.id),
+    getTonnage(since, user.id),
+    getStrengthTrend(since, user.id),
   ]);
 
   return (

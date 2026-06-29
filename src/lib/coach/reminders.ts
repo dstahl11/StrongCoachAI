@@ -6,6 +6,7 @@ import {
   workoutExercises,
   setGroups,
   coachEvents,
+  coachProfile,
   type CoachProfile,
 } from "@/db/schema";
 import { todayISO, fmt, shiftISO } from "@/lib/dates";
@@ -21,16 +22,17 @@ const num = (v: string | number | null) =>
 
 export { getBlackouts };
 
-// ---- event log / dedupe ----
-async function alreadyDone(dedupeKey: string): Promise<boolean> {
+// ---- event log / dedupe (per user) ----
+async function alreadyDone(dedupeKey: string, userId: number): Promise<boolean> {
   const rows = await db
     .select({ id: coachEvents.id })
     .from(coachEvents)
-    .where(eq(coachEvents.dedupeKey, dedupeKey))
+    .where(and(eq(coachEvents.dedupeKey, dedupeKey), eq(coachEvents.userId, userId)))
     .limit(1);
   return rows.length > 0;
 }
 async function logEvent(e: {
+  userId: number;
   type: string;
   status: string;
   subject?: string;
@@ -39,6 +41,7 @@ async function logEvent(e: {
   meta?: unknown;
 }) {
   await db.insert(coachEvents).values({
+    userId: e.userId,
     type: e.type,
     channel: "email",
     status: e.status,
@@ -49,7 +52,7 @@ async function logEvent(e: {
   });
 }
 
-// ---- workout line helper ----
+// ---- workout line helper (workout is already user-owned) ----
 async function planLines(workoutId: number): Promise<string[]> {
   const wes = await db.query.workoutExercises.findMany({
     where: eq(workoutExercises.workoutId, workoutId),
@@ -70,12 +73,20 @@ export type Miss = { date: string; lines: string[] };
 
 /** Past planned workouts not completed (and not on a blackout day). */
 export async function detectMisses(profile: CoachProfile): Promise<Miss[]> {
+  const userId = profile.userId;
+  if (userId == null) return [];
   const today = todayISO();
-  const ranges = await getBlackouts();
+  const ranges = await getBlackouts(userId);
   const rows = await db
     .select({ id: workouts.id, date: workouts.date })
     .from(workouts)
-    .where(and(lt(workouts.date, today), ne(workouts.status, "complete")))
+    .where(
+      and(
+        lt(workouts.date, today),
+        ne(workouts.status, "complete"),
+        eq(workouts.userId, userId),
+      ),
+    )
     .orderBy(desc(workouts.date))
     .limit(10);
 
@@ -84,7 +95,6 @@ export async function detectMisses(profile: CoachProfile): Promise<Miss[]> {
     if (blackoutFor(w.date, ranges)) continue;
     out.push({ date: w.date, lines: await planLines(w.id) });
   }
-  // keep within the grace window so we don't nag about ancient history
   const cutoff = shiftISO(today, -(profile.missedGraceDays + 14));
   return out.filter((m) => m.date >= cutoff);
 }
@@ -94,11 +104,12 @@ async function personaWrite(
   task: string,
   facts: string,
   model: string,
+  userId: number,
 ): Promise<string | null> {
   if (!coachConfigured()) return null;
   try {
-    const profile = await getCoachProfile();
-    const memories = await getMemories();
+    const profile = await getCoachProfile(userId);
+    const memories = await getMemories(userId);
     const sys = `${profile.persona || "You are an encouraging strength coach."}
 
 You are ${profile.name}. Write a SHORT email body (2-4 sentences, warm, in your voice).
@@ -127,12 +138,13 @@ export async function composeDigest(profile: CoachProfile): Promise<{
   html: string;
   kind: "workout" | "rest" | "away";
 }> {
+  const userId = profile.userId!;
   const today = todayISO();
-  const ranges = await getBlackouts();
+  const ranges = await getBlackouts(userId);
   const away = blackoutFor(today, ranges);
 
   const todays = await db.query.workouts.findFirst({
-    where: eq(workouts.date, today),
+    where: and(eq(workouts.date, today), eq(workouts.userId, userId)),
   });
   const lines = todays ? await planLines(todays.id) : [];
 
@@ -156,6 +168,7 @@ export async function composeDigest(profile: CoachProfile): Promise<{
     "Write this morning's training digest email.",
     facts,
     coachModel(profile.model),
+    userId,
   );
 
   const planHtml =
@@ -199,6 +212,7 @@ export async function composeReminder(
     "Write a short accountability nudge about this missed session — firm but encouraging, and invite them to get it in or reschedule.",
     facts,
     coachModel(profile.model),
+    profile.userId!,
   );
   const intro =
     written ??
@@ -225,20 +239,23 @@ function escapeHtml(s: string) {
 
 export type TickReport = {
   ranAt: string;
+  userId: number;
   digest: "sent" | "skipped" | "failed" | "disabled" | "no-email";
   reminders: { sent: number; skipped: number; failed: number };
   notes: string[];
 };
 
-/** The daily heartbeat: morning digest + miss reminders (+ Phase 3 autoscheduling). */
-export async function runDailyTick(
+/** Run the daily pipeline for ONE user (digest + miss reminders + autoscheduling). */
+export async function runUserTick(
+  profile: CoachProfile,
   opts: { force?: boolean } = {},
 ): Promise<TickReport> {
-  const profile = await getCoachProfile();
+  const userId = profile.userId!;
   const today = todayISO();
   const to = profile.reminderEmail || process.env.COACH_REMINDER_TO || "";
   const report: TickReport = {
     ranAt: new Date().toISOString(),
+    userId,
     digest: "skipped",
     reminders: { sent: 0, skipped: 0, failed: 0 },
     notes: [],
@@ -247,13 +264,14 @@ export async function runDailyTick(
   if (!emailConfigured()) report.notes.push("Email not configured (RESEND_API_KEY).");
   if (!to) report.notes.push("No reminder email set.");
 
-  // ----- autonomous programming: keep the calendar populated -----
+  // autonomous programming
   if (profile.autonomousProgramming) {
     try {
       const created = await ensureScheduled(profile, 14);
       if (created.length) {
         report.notes.push(`Programmed ${created.length} upcoming session(s).`);
         await logEvent({
+          userId,
           type: "program_update",
           status: "sent",
           subject: "auto-scheduled sessions",
@@ -267,19 +285,20 @@ export async function runDailyTick(
     }
   }
 
-  // ----- digest -----
+  // digest
   if (!profile.digestEnabled && !opts.force) {
     report.digest = "disabled";
   } else if (!to || !emailConfigured()) {
     report.digest = "no-email";
   } else {
     const dedupe = `digest:${today}`;
-    if (!opts.force && (await alreadyDone(dedupe))) {
+    if (!opts.force && (await alreadyDone(dedupe, userId))) {
       report.digest = "skipped";
     } else {
       const d = await composeDigest(profile);
       const r = await sendEmail({ to, subject: d.subject, html: d.html });
       await logEvent({
+        userId,
         type: "digest",
         status: r.ok ? "sent" : "failed",
         subject: d.subject,
@@ -291,18 +310,19 @@ export async function runDailyTick(
     }
   }
 
-  // ----- miss reminders -----
+  // miss reminders
   if ((profile.remindersEnabled || opts.force) && to && emailConfigured()) {
     const misses = await detectMisses(profile);
     for (const m of misses) {
       const dedupe = `miss:${m.date}`;
-      if (!opts.force && (await alreadyDone(dedupe))) {
+      if (!opts.force && (await alreadyDone(dedupe, userId))) {
         report.reminders.skipped++;
         continue;
       }
       const c = await composeReminder(profile, m);
       const r = await sendEmail({ to, subject: c.subject, html: c.html });
       await logEvent({
+        userId,
         type: "reminder",
         status: r.ok ? "sent" : "failed",
         subject: c.subject,
@@ -317,6 +337,7 @@ export async function runDailyTick(
   }
 
   await logEvent({
+    userId,
     type: "check",
     status: "sent",
     subject: "daily tick",
@@ -325,12 +346,33 @@ export async function runDailyTick(
   return report;
 }
 
-/** Send a one-off test email of the given kind (ignores enabled flags + dedupe). */
-export async function sendTest(kind: "digest" | "reminder"): Promise<{
-  ok: boolean;
-  error?: string;
-}> {
-  const profile = await getCoachProfile();
+/** Cron entry point: run the pipeline for every user that has a coach. Unless
+ *  `force`, each user only runs at their configured digest hour (so an hourly
+ *  cron fires each athlete at their own time). */
+export async function runDailyTick(
+  opts: { force?: boolean } = {},
+): Promise<{ users: number; reports: TickReport[] }> {
+  const profiles = await db.select().from(coachProfile);
+  const hour = new Date().getHours();
+  const reports: TickReport[] = [];
+  for (const profile of profiles) {
+    if (profile.userId == null) continue;
+    if (!opts.force && profile.digestHour !== hour) continue;
+    try {
+      reports.push(await runUserTick(profile, opts));
+    } catch (e) {
+      console.error("[coach] user tick failed", profile.userId, e);
+    }
+  }
+  return { users: reports.length, reports };
+}
+
+/** Send a one-off test email of the given kind for a user (ignores flags + dedupe). */
+export async function sendTest(
+  kind: "digest" | "reminder",
+  userId: number,
+): Promise<{ ok: boolean; error?: string }> {
+  const profile = await getCoachProfile(userId);
   const to = profile.reminderEmail || process.env.COACH_REMINDER_TO || "";
   if (!to) return { ok: false, error: "Set a reminder email first." };
   if (!emailConfigured())
@@ -339,10 +381,9 @@ export async function sendTest(kind: "digest" | "reminder"): Promise<{
   if (kind === "digest") {
     const d = await composeDigest(profile);
     const r = await sendEmail({ to, subject: `[Test] ${d.subject}`, html: d.html });
-    await logEvent({ type: "digest", status: r.ok ? "sent" : "failed", subject: `[Test] ${d.subject}`, meta: { test: true, error: r.error } });
+    await logEvent({ userId, type: "digest", status: r.ok ? "sent" : "failed", subject: `[Test] ${d.subject}`, meta: { test: true, error: r.error } });
     return r;
   }
-  // reminder: use the most recent real miss, else a sample
   const misses = await detectMisses(profile);
   const miss: Miss = misses[0] ?? {
     date: shiftISO(todayISO(), -1),
@@ -350,6 +391,6 @@ export async function sendTest(kind: "digest" | "reminder"): Promise<{
   };
   const c = await composeReminder(profile, miss);
   const r = await sendEmail({ to, subject: `[Test] ${c.subject}`, html: c.html });
-  await logEvent({ type: "reminder", status: r.ok ? "sent" : "failed", subject: `[Test] ${c.subject}`, meta: { test: true, error: r.error } });
+  await logEvent({ userId, type: "reminder", status: r.ok ? "sent" : "failed", subject: `[Test] ${c.subject}`, meta: { test: true, error: r.error } });
   return r;
 }

@@ -1,5 +1,6 @@
 import { getCoachProfile, getMemories } from "@/lib/coach/context";
 import { getBlackouts } from "@/lib/coach/blackouts";
+import { requireUser } from "@/lib/auth/current-user";
 import CoachSettings from "@/components/CoachSettings";
 
 export const dynamic = "force-dynamic";
@@ -11,10 +12,11 @@ type ProgramConfig = {
 };
 
 export default async function CoachSettingsPage() {
+  const user = await requireUser();
   const [profile, memories, blackouts] = await Promise.all([
-    getCoachProfile(),
-    getMemories(),
-    getBlackouts(),
+    getCoachProfile(user.id),
+    getMemories(user.id),
+    getBlackouts(user.id),
   ]);
   const pc = (profile.programConfig as ProgramConfig) ?? {};
 

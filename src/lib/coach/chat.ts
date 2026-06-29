@@ -1,5 +1,5 @@
 import "server-only";
-import { asc, desc } from "drizzle-orm";
+import { asc, desc, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
 import { chatMessages } from "@/db/schema";
@@ -18,10 +18,13 @@ export type ChatResult = {
 };
 
 /** Load recent persisted transcript as OpenAI-format messages. */
-async function loadHistory(): Promise<{ role: string; content: string }[]> {
+async function loadHistory(
+  userId: number,
+): Promise<{ role: string; content: string }[]> {
   const rows = await db
     .select()
     .from(chatMessages)
+    .where(eq(chatMessages.userId, userId))
     .orderBy(desc(chatMessages.createdAt))
     .limit(MAX_HISTORY);
   return rows
@@ -31,14 +34,17 @@ async function loadHistory(): Promise<{ role: string; content: string }[]> {
 
 /** Run one coach turn: persist the user message, call Claude (with tools),
  *  execute any tool calls, persist + return the assistant reply. */
-export async function runChat(userText: string): Promise<ChatResult> {
+export async function runChat(
+  userId: number,
+  userText: string,
+): Promise<ChatResult> {
   const text = userText.trim();
   if (!text) return { reply: "", actions: [] };
 
-  await db.insert(chatMessages).values({ role: "user", content: text });
+  await db.insert(chatMessages).values({ userId, role: "user", content: text });
 
-  const { prompt, profile } = await buildSystemPrompt();
-  const history = await loadHistory();
+  const { prompt, profile } = await buildSystemPrompt(userId);
+  const history = await loadHistory(userId);
 
   const messages: any[] = [
     { role: "system", content: prompt },
@@ -81,7 +87,7 @@ export async function runChat(userText: string): Promise<ChatResult> {
         actions.push(name);
         let result: unknown;
         try {
-          result = await runTool(name, parsed);
+          result = await runTool(name, parsed, userId);
         } catch (e) {
           result = { ok: false, message: e instanceof Error ? e.message : "tool error" };
         }
@@ -99,7 +105,9 @@ export async function runChat(userText: string): Promise<ChatResult> {
   }
 
   if (reply) {
-    await db.insert(chatMessages).values({ role: "assistant", content: reply });
+    await db
+      .insert(chatMessages)
+      .values({ userId, role: "assistant", content: reply });
   }
   // tool actions may have changed workouts/memory/config
   if (actions.length) {
@@ -111,11 +119,15 @@ export async function runChat(userText: string): Promise<ChatResult> {
 }
 
 /** Full persisted transcript (oldest first) for rendering the chat page. */
-export async function getTranscript() {
-  return db.select().from(chatMessages).orderBy(asc(chatMessages.createdAt));
+export async function getTranscript(userId: number) {
+  return db
+    .select()
+    .from(chatMessages)
+    .where(eq(chatMessages.userId, userId))
+    .orderBy(asc(chatMessages.createdAt));
 }
 
-export async function clearTranscript() {
-  await db.delete(chatMessages);
+export async function clearTranscript(userId: number) {
+  await db.delete(chatMessages).where(eq(chatMessages.userId, userId));
   revalidatePath("/coach");
 }

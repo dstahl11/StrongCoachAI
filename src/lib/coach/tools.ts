@@ -1,5 +1,5 @@
 import "server-only";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
 import {
@@ -171,9 +171,9 @@ type ScheduleArgs = {
   exercises: { name: string; sets: number; reps: number; weight: number }[];
 };
 
-async function scheduleWorkout(args: ScheduleArgs) {
+async function scheduleWorkout(args: ScheduleArgs, userId: number) {
   const existing = await db.query.workouts.findFirst({
-    where: eq(workouts.date, args.date),
+    where: and(eq(workouts.date, args.date), eq(workouts.userId, userId)),
   });
   if (existing && existing.status === "complete") {
     return { ok: false, message: `${args.date} is already completed; not overwriting.` };
@@ -191,7 +191,7 @@ async function scheduleWorkout(args: ScheduleArgs) {
   } else {
     const [wo] = await db
       .insert(workouts)
-      .values({ date: args.date, title: "Workout", status: "upcoming", source: "coach" })
+      .values({ userId, date: args.date, title: "Workout", status: "upcoming", source: "coach" })
       .returning();
     workoutId = wo.id;
   }
@@ -221,9 +221,12 @@ async function scheduleWorkout(args: ScheduleArgs) {
   };
 }
 
-async function mergeProgramConfig(patch: Record<string, unknown>) {
-  const [p] = await db.select().from(coachProfile).where(eq(coachProfile.id, 1));
-  const current = (p?.programConfig as Record<string, unknown>) ?? {};
+async function mergeProgramConfig(
+  patch: Record<string, unknown>,
+  userId: number,
+) {
+  const profile = await getCoachProfile(userId);
+  const current = (profile.programConfig as Record<string, unknown>) ?? {};
   const next = { ...current };
   for (const [k, v] of Object.entries(patch)) {
     if (v === undefined) continue;
@@ -240,27 +243,29 @@ async function mergeProgramConfig(patch: Record<string, unknown>) {
   await db
     .update(coachProfile)
     .set({ programConfig: next, updatedAt: new Date() })
-    .where(eq(coachProfile.id, 1));
+    .where(eq(coachProfile.userId, userId));
   revalidatePath("/coach/settings");
   return { ok: true, message: "Program config updated.", config: next };
 }
 
-/** Execute a tool call by name. Returns a JSON-serializable result. */
+/** Execute a tool call by name, scoped to the acting user. */
 export async function runTool(
   name: string,
   args: Record<string, unknown>,
+  userId: number,
 ): Promise<unknown> {
   switch (name) {
     case "get_training_summary":
-      return getTrainingSummary();
+      return getTrainingSummary(userId);
 
     case "schedule_workout":
-      return scheduleWorkout(args as unknown as ScheduleArgs);
+      return scheduleWorkout(args as unknown as ScheduleArgs, userId);
 
     case "remember": {
       const [m] = await db
         .insert(coachMemories)
         .values({
+          userId,
           kind: String(args.kind ?? "note"),
           content: String(args.content ?? "").trim(),
         })
@@ -272,13 +277,18 @@ export async function runTool(
     case "forget": {
       await db
         .delete(coachMemories)
-        .where(eq(coachMemories.id, Number(args.id)));
+        .where(
+          and(
+            eq(coachMemories.id, Number(args.id)),
+            eq(coachMemories.userId, userId),
+          ),
+        );
       revalidatePath("/coach/settings");
       return { ok: true, message: "Memory removed." };
     }
 
     case "update_program_config":
-      return mergeProgramConfig(args);
+      return mergeProgramConfig(args, userId);
 
     case "set_blackout": {
       const start = String(args.startDate);
@@ -286,12 +296,13 @@ export async function runTool(
       const [b] = await db
         .insert(blackoutDays)
         .values({
+          userId,
           startDate: start,
           endDate: end,
           reason: args.reason ? String(args.reason) : null,
         })
         .returning();
-      const cleared = await clearCoachWorkoutsInRange(start, end);
+      const cleared = await clearCoachWorkoutsInRange(start, end, userId);
       revalidatePath("/calendar");
       revalidatePath("/coach/settings");
       return {
@@ -303,14 +314,21 @@ export async function runTool(
     }
 
     case "clear_blackout": {
-      await db.delete(blackoutDays).where(eq(blackoutDays.id, Number(args.id)));
+      await db
+        .delete(blackoutDays)
+        .where(
+          and(
+            eq(blackoutDays.id, Number(args.id)),
+            eq(blackoutDays.userId, userId),
+          ),
+        );
       revalidatePath("/calendar");
       revalidatePath("/coach/settings");
       return { ok: true, message: "Blackout removed." };
     }
 
     case "program_upcoming": {
-      const profile = await getCoachProfile();
+      const profile = await getCoachProfile(userId);
       const created = await ensureScheduled(
         profile,
         Number(args.daysAhead) || 14,

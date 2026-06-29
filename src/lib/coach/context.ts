@@ -2,7 +2,6 @@ import "server-only";
 import { and, asc, desc, eq, gte, lt, ne } from "drizzle-orm";
 import { db } from "@/db";
 import {
-  coachProfile,
   coachMemories,
   workouts,
   workoutExercises,
@@ -15,36 +14,21 @@ import {
 import { todayISO, fmt } from "@/lib/dates";
 import { fmtWeight, epley1RM } from "@/lib/strength";
 import { STARTING_STRENGTH } from "./starting-strength";
+import { ensureCoachProfile } from "./template";
 
 const num = (v: string | number | null) =>
   v === null ? 0 : typeof v === "number" ? v : parseFloat(v);
 
-export async function getCoachProfile(): Promise<CoachProfile> {
-  const [p] = await db.select().from(coachProfile).where(eq(coachProfile.id, 1));
-  if (p) return p;
-  // fall back to an in-memory default if the seed hasn't run
-  return {
-    id: 1,
-    userId: null,
-    name: "Coach",
-    persona: "",
-    model: "claude-sonnet-4-6",
-    remindersEnabled: false,
-    digestEnabled: false,
-    reminderEmail: null,
-    missedGraceDays: 1,
-    inactivityDays: 3,
-    digestHour: 7,
-    autonomousProgramming: false,
-    programConfig: null,
-    updatedAt: new Date(),
-  };
+/** The user's coach profile (lazily created from the template on first use). */
+export async function getCoachProfile(userId: number): Promise<CoachProfile> {
+  return ensureCoachProfile(userId);
 }
 
-export async function getMemories(): Promise<CoachMemory[]> {
+export async function getMemories(userId: number): Promise<CoachMemory[]> {
   return db
     .select()
     .from(coachMemories)
+    .where(eq(coachMemories.userId, userId))
     .orderBy(desc(coachMemories.pinned), asc(coachMemories.createdAt));
 }
 
@@ -59,14 +43,16 @@ export type TrainingSummary = {
 };
 
 /** A compact, current snapshot of the athlete's training for the coach's context. */
-export async function getTrainingSummary(): Promise<TrainingSummary> {
+export async function getTrainingSummary(
+  userId: number,
+): Promise<TrainingSummary> {
   const today = todayISO();
 
   // recent completed sessions (last 8) with their top logged set per exercise
   const completed = await db
     .select({ id: workouts.id, date: workouts.date })
     .from(workouts)
-    .where(eq(workouts.status, "complete"))
+    .where(and(eq(workouts.status, "complete"), eq(workouts.userId, userId)))
     .orderBy(desc(workouts.date))
     .limit(8);
 
@@ -114,7 +100,7 @@ export async function getTrainingSummary(): Promise<TrainingSummary> {
     .innerJoin(workoutExercises, eq(workoutExercises.id, loggedSets.workoutExerciseId))
     .innerJoin(exercises, eq(exercises.id, workoutExercises.exerciseId))
     .innerJoin(workouts, eq(workouts.id, workoutExercises.workoutId))
-    .where(eq(loggedSets.completed, true))
+    .where(and(eq(loggedSets.completed, true), eq(workouts.userId, userId)))
     .orderBy(desc(workouts.date), desc(loggedSets.weight));
 
   const seen = new Map<string, { name: string; weight: number; reps: number; e1rm: number; date: string }>();
@@ -144,7 +130,13 @@ export async function getTrainingSummary(): Promise<TrainingSummary> {
   const up = await db
     .select({ id: workouts.id, date: workouts.date })
     .from(workouts)
-    .where(and(gte(workouts.date, today), eq(workouts.status, "upcoming")))
+    .where(
+      and(
+        gte(workouts.date, today),
+        eq(workouts.status, "upcoming"),
+        eq(workouts.userId, userId),
+      ),
+    )
     .orderBy(asc(workouts.date))
     .limit(5);
   const upcoming: TrainingSummary["upcoming"] = [];
@@ -154,7 +146,13 @@ export async function getTrainingSummary(): Promise<TrainingSummary> {
   const ms = await db
     .select({ id: workouts.id, date: workouts.date })
     .from(workouts)
-    .where(and(lt(workouts.date, today), ne(workouts.status, "complete")))
+    .where(
+      and(
+        lt(workouts.date, today),
+        ne(workouts.status, "complete"),
+        eq(workouts.userId, userId),
+      ),
+    )
     .orderBy(desc(workouts.date))
     .limit(5);
   const misses: TrainingSummary["misses"] = [];
@@ -227,14 +225,14 @@ export function memoriesToText(memories: CoachMemory[]): string {
 }
 
 /** Assemble the full system prompt for a coach turn. */
-export async function buildSystemPrompt(): Promise<{
+export async function buildSystemPrompt(userId: number): Promise<{
   prompt: string;
   profile: CoachProfile;
 }> {
   const [profile, memories, summary] = await Promise.all([
-    getCoachProfile(),
-    getMemories(),
-    getTrainingSummary(),
+    getCoachProfile(userId),
+    getMemories(userId),
+    getTrainingSummary(userId),
   ]);
 
   const prompt = `${profile.persona || "You are a knowledgeable, encouraging strength coach."}

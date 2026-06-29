@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import {
   workouts,
@@ -11,6 +11,7 @@ import {
   exercises,
 } from "@/db/schema";
 import { fromISO } from "@/lib/dates";
+import { requireUser } from "@/lib/auth/current-user";
 
 function revalidate(date?: string) {
   revalidatePath("/calendar");
@@ -18,9 +19,41 @@ function revalidate(date?: string) {
   if (date) revalidatePath(`/day/${date}`);
 }
 
+async function currentUserId(): Promise<number> {
+  return (await requireUser()).id;
+}
+
+// ---- ownership guards (throw if the row isn't the user's) ----
+async function assertOwnsWorkout(workoutId: number, uid: number) {
+  const [w] = await db
+    .select({ userId: workouts.userId })
+    .from(workouts)
+    .where(eq(workouts.id, workoutId));
+  if (!w || w.userId !== uid) throw new Error("Not found.");
+}
+async function assertOwnsWorkoutExercise(weId: number, uid: number) {
+  const [w] = await db
+    .select({ userId: workouts.userId })
+    .from(workoutExercises)
+    .innerJoin(workouts, eq(workouts.id, workoutExercises.workoutId))
+    .where(eq(workoutExercises.id, weId));
+  if (!w || w.userId !== uid) throw new Error("Not found.");
+}
+async function assertOwnsSetGroup(sgId: number, uid: number) {
+  const [w] = await db
+    .select({ userId: workouts.userId })
+    .from(setGroups)
+    .innerJoin(workoutExercises, eq(workoutExercises.id, setGroups.workoutExerciseId))
+    .innerJoin(workouts, eq(workouts.id, workoutExercises.workoutId))
+    .where(eq(setGroups.id, sgId));
+  if (!w || w.userId !== uid) throw new Error("Not found.");
+}
+
 /** Mark a workout complete. Materializes logged sets from the prescription
  *  for any exercise that has none yet. */
 export async function markWorkoutComplete(workoutId: number, date: string) {
+  const uid = await currentUserId();
+  await assertOwnsWorkout(workoutId, uid);
   const wes = await db.query.workoutExercises.findMany({
     where: eq(workoutExercises.workoutId, workoutId),
     with: { setGroups: true, loggedSets: true },
@@ -55,6 +88,8 @@ export async function markWorkoutComplete(workoutId: number, date: string) {
 }
 
 export async function reopenWorkout(workoutId: number, date: string) {
+  const uid = await currentUserId();
+  await assertOwnsWorkout(workoutId, uid);
   await db
     .update(workouts)
     .set({ status: "upcoming", completedAt: null })
@@ -67,6 +102,8 @@ export async function setExerciseSkipped(
   skipped: boolean,
   date: string,
 ) {
+  const uid = await currentUserId();
+  await assertOwnsWorkoutExercise(workoutExerciseId, uid);
   await db
     .update(workoutExercises)
     .set({ skipped })
@@ -79,6 +116,8 @@ export async function saveExerciseComment(
   comment: string,
   date: string,
 ) {
+  const uid = await currentUserId();
+  await assertOwnsWorkoutExercise(workoutExerciseId, uid);
   await db
     .update(workoutExercises)
     .set({ comment: comment.trim() || null })
@@ -91,6 +130,8 @@ export async function saveExerciseVideo(
   videoUrl: string,
   date: string,
 ) {
+  const uid = await currentUserId();
+  await assertOwnsWorkoutExercise(workoutExerciseId, uid);
   await db
     .update(workoutExercises)
     .set({ videoUrl: videoUrl.trim() || null })
@@ -103,6 +144,8 @@ export async function saveWorkoutComment(
   notes: string,
   date: string,
 ) {
+  const uid = await currentUserId();
+  await assertOwnsWorkout(workoutId, uid);
   await db
     .update(workouts)
     .set({ notes: notes.trim() || null })
@@ -116,6 +159,8 @@ export async function saveLoggedSets(
   sets: { reps: number; weight: number; completed: boolean }[],
   date: string,
 ) {
+  const uid = await currentUserId();
+  await assertOwnsWorkoutExercise(workoutExerciseId, uid);
   await db
     .delete(loggedSets)
     .where(eq(loggedSets.workoutExerciseId, workoutExerciseId));
@@ -139,6 +184,8 @@ export async function updateSetGroup(
   data: { sets: number; reps: number; weight: number },
   date: string,
 ) {
+  const uid = await currentUserId();
+  await assertOwnsSetGroup(setGroupId, uid);
   await db
     .update(setGroups)
     .set({ sets: data.sets, reps: data.reps, weight: data.weight.toFixed(2) })
@@ -147,6 +194,8 @@ export async function updateSetGroup(
 }
 
 export async function deleteSetGroup(setGroupId: number, date: string) {
+  const uid = await currentUserId();
+  await assertOwnsSetGroup(setGroupId, uid);
   await db.delete(setGroups).where(eq(setGroups.id, setGroupId));
   revalidate(date);
 }
@@ -154,13 +203,14 @@ export async function deleteSetGroup(setGroupId: number, date: string) {
 // ---- Builder actions ----
 
 export async function createWorkout(date: string) {
+  const uid = await currentUserId();
   const existing = await db.query.workouts.findFirst({
-    where: eq(workouts.date, date),
+    where: and(eq(workouts.date, date), eq(workouts.userId, uid)),
   });
   if (existing) return existing.id;
   const [wo] = await db
     .insert(workouts)
-    .values({ date, title: "Workout", status: "upcoming" })
+    .values({ userId: uid, date, title: "Workout", status: "upcoming" })
     .returning();
   revalidate(date);
   return wo.id;
@@ -172,6 +222,8 @@ export async function addExerciseToWorkout(
   scheme: { sets: number; reps: number; weight: number },
   date: string,
 ) {
+  const uid = await currentUserId();
+  await assertOwnsWorkout(workoutId, uid);
   const count = await db
     .select({ id: workoutExercises.id })
     .from(workoutExercises)
@@ -195,6 +247,8 @@ export async function addSetGroup(
   scheme: { sets: number; reps: number; weight: number },
   date: string,
 ) {
+  const uid = await currentUserId();
+  await assertOwnsWorkoutExercise(workoutExerciseId, uid);
   const existing = await db
     .select({ position: setGroups.position })
     .from(setGroups)
@@ -213,17 +267,22 @@ export async function removeWorkoutExercise(
   workoutExerciseId: number,
   date: string,
 ) {
+  const uid = await currentUserId();
+  await assertOwnsWorkoutExercise(workoutExerciseId, uid);
   await db
     .delete(workoutExercises)
     .where(eq(workoutExercises.id, workoutExerciseId));
   revalidate(date);
 }
 
+// ---- Exercise catalog (shared/global; any signed-in user may edit) ----
+
 export async function createExercise(data: {
   name: string;
   demoUrl?: string;
   muscleGroup?: string;
 }) {
+  await requireUser();
   const [ex] = await db
     .insert(exercises)
     .values({
@@ -240,6 +299,7 @@ export async function updateExercise(
   id: number,
   data: { name: string; demoUrl?: string; muscleGroup?: string },
 ) {
+  await requireUser();
   await db
     .update(exercises)
     .set({
@@ -257,6 +317,7 @@ export async function deleteExercise(
   id: number,
   force = false,
 ): Promise<{ ok: boolean; usedIn?: number }> {
+  await requireUser();
   const refs = await db
     .select({ id: workoutExercises.id })
     .from(workoutExercises)
@@ -266,7 +327,6 @@ export async function deleteExercise(
     return { ok: false, usedIn: refs.length };
   }
   if (refs.length > 0 && force) {
-    // remove dependent workout history first (FK is restrict)
     for (const r of refs) {
       await db
         .delete(workoutExercises)
