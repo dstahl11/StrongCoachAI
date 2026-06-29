@@ -67,13 +67,17 @@ export default function CoachSettings({
   profile,
   memories,
   blackouts,
+  targetUserId,
 }: {
   profile: ProfileProps;
   memories: Mem[];
   blackouts: Blackout[];
+  /** When an admin edits another user's coach. Undefined = the current user. */
+  targetUserId?: number;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
+  const t = targetUserId; // pass-through to each scoped action
 
   // programming & schedule
   const [autonomous, setAutonomous] = useState(profile.autonomousProgramming);
@@ -92,8 +96,8 @@ export default function CoachSettings({
   }
   function saveProgram() {
     startTransition(async () => {
-      await updateCoachProfile({ autonomousProgramming: autonomous });
-      await updateProgramConfig({ daysOfWeek: days });
+      await updateCoachProfile({ autonomousProgramming: autonomous }, t);
+      await updateProgramConfig({ daysOfWeek: days }, t);
       setProgSaved("Saved");
       setTimeout(() => setProgSaved(null), 1500);
       router.refresh();
@@ -101,7 +105,7 @@ export default function CoachSettings({
   }
   async function fillUpcoming() {
     setProgBusy(true);
-    const r = await programUpcoming();
+    const r = await programUpcoming(t);
     setProgBusy(false);
     setProgToast(
       r.created ? `Programmed ${r.created} upcoming session(s) ✓` : "Nothing to add — already planned/blacked out.",
@@ -127,13 +131,16 @@ export default function CoachSettings({
 
   function saveEmail() {
     startTransition(async () => {
-      await updateCoachProfile({
-        reminderEmail: email || null,
-        remindersEnabled,
-        digestEnabled,
-        digestHour,
-        inactivityDays,
-      });
+      await updateCoachProfile(
+        {
+          reminderEmail: email || null,
+          remindersEnabled,
+          digestEnabled,
+          digestHour,
+          inactivityDays,
+        },
+        t,
+      );
       setEmailSaved("Saved");
       setTimeout(() => setEmailSaved(null), 1500);
       router.refresh();
@@ -143,7 +150,7 @@ export default function CoachSettings({
   async function doTest(kind: "digest" | "reminder") {
     setBusy(kind);
     setToast(null);
-    const res = await sendTestEmail(kind);
+    const res = await sendTestEmail(kind, t);
     setBusy(null);
     setToast(res.ok ? `Test ${kind} sent ✓` : `Failed: ${res.error}`);
     setTimeout(() => setToast(null), 4000);
@@ -152,7 +159,7 @@ export default function CoachSettings({
   async function doTick() {
     setBusy("tick");
     setToast(null);
-    const r = await runCoachTick();
+    const r = await runCoachTick(t);
     setBusy(null);
     setToast(
       `Check ran — digest: ${r.digest}, reminders sent: ${r.reminders.sent}` +
@@ -171,7 +178,7 @@ export default function CoachSettings({
 
   function saveProfile() {
     startTransition(async () => {
-      await updateCoachProfile({ name, persona, model });
+      await updateCoachProfile({ name, persona, model }, t);
       setSavedAt("Saved");
       setTimeout(() => setSavedAt(null), 1500);
       router.refresh();
@@ -487,7 +494,7 @@ export default function CoachSettings({
             <button
               onClick={() =>
                 startTransition(async () => {
-                  await addBlackout(boStart, boEnd || boStart, boReason);
+                  await addBlackout(boStart, boEnd || boStart, boReason, t);
                   setBoStart("");
                   setBoEnd("");
                   setBoReason("");
@@ -517,7 +524,7 @@ export default function CoachSettings({
                 <button
                   onClick={() =>
                     startTransition(async () => {
-                      await deleteBlackout(b.id);
+                      await deleteBlackout(b.id, t);
                       router.refresh();
                     })
                   }
@@ -579,7 +586,7 @@ export default function CoachSettings({
               <button
                 onClick={() =>
                   startTransition(async () => {
-                    await addCoachMemory(newKind, newContent);
+                    await addCoachMemory(newKind, newContent, t);
                     setNewContent("");
                     setAdding(false);
                     router.refresh();
@@ -625,11 +632,15 @@ export default function CoachSettings({
                   <button
                     onClick={() =>
                       startTransition(async () => {
-                        await updateCoachMemory(m.id, {
-                          kind: editKind,
-                          content: editContent,
-                          pinned: m.pinned,
-                        });
+                        await updateCoachMemory(
+                          m.id,
+                          {
+                            kind: editKind,
+                            content: editContent,
+                            pinned: m.pinned,
+                          },
+                          t,
+                        );
                         setEditId(null);
                         router.refresh();
                       })
@@ -677,7 +688,7 @@ export default function CoachSettings({
                   <button
                     onClick={() =>
                       startTransition(async () => {
-                        await deleteCoachMemory(m.id);
+                        await deleteCoachMemory(m.id, t);
                         router.refresh();
                       })
                     }
