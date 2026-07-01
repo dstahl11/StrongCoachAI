@@ -1,7 +1,6 @@
 # StrongCoach — AI Strength Coaching
 
-A strength-training app with an AI coach, inspired by
-[Turnkey Coach](https://app.turnkey.coach/): plan workouts, log your lifts
+A strength-training app with an AI coach: plan workouts, log your lifts
 set-by-set, track PRs / estimated 1RMs / tonnage / consistency over time, and
 train with an AI coach that programs for you and holds you accountable.
 
@@ -10,9 +9,9 @@ train with an AI coach that programs for you and holds you accountable.
 - **Calendar** — a scrollable **month view** (infinite scroll + month/year jump
   dropdown) and a **list view** (week strip + per-day summary), with completion
   dots on every day.
-- **CSV import** — bring in Barbell Logic / TurnKey workout-history exports from
-  the calendar (or `npm run import`); completed workouts without per-set actuals
-  fall back to the prescription so they still feed PRs and charts.
+- **CSV import** — bring in workout-history CSV exports from the calendar (or
+  `npm run import`); completed workouts without per-set actuals fall back to the
+  prescription so they still feed PRs and charts.
 - **Exercise library** — searchable catalog; create, **edit**, and **delete**
   (delete is guarded when an exercise has workout history).
 - **AI Coach ("Hank")** — chat with a Starting-Strength coach that knows your full training
